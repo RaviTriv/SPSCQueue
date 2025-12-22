@@ -23,3 +23,20 @@ add_compile_options(
 
 add_executable(main src/main.cpp)
 target_link_libraries(main PRIVATE spsc_queue)
+
+option(BUILD_TESTS "Build tests" ON)
+if(BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG v1.14.0
+    )
+    FetchContent_MakeAvailable(googletest)
+
+    enable_testing()
+    add_executable(test_basic tests/test_basic.cpp)
+    target_link_libraries(test_basic PRIVATE spsc_queue GTest::gtest_main)
+    include(GoogleTest)
+    gtest_discover_tests(test_basic)
+endif()
