@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 
 namespace spsc {
@@ -12,8 +13,9 @@ public:
     if (full()) {
       return false;
     }
-    buffer_[tail_] = item;
-    tail_ = (tail_ + 1) % Capacity;
+    std::size_t t = tail_.load();
+    buffer_[t] = item;
+    tail_.store((t + 1) % Capacity);
     return true;
   }
 
@@ -21,24 +23,27 @@ public:
     if (empty()) {
       return false;
     }
-    item = buffer_[head_];
-    head_ = (head_ + 1) % Capacity;
+    std::size_t h = head_.load();
+    item = buffer_[h];
+    head_.store((h + 1) % Capacity);
     return true;
   }
 
-  bool empty() const { return head_ == tail_; }
-  bool full() const { return (tail_ + 1) % Capacity == head_; }
+  bool empty() const { return head_.load() == tail_.load(); }
+  bool full() const { return (tail_.load() + 1) % Capacity == head_.load(); }
   static constexpr std::size_t capacity() { return Capacity; };
   std::size_t size() const {
-    if (tail_ >= head_) {
-      return tail_ - head_;
+    std::size_t h = head_.load();
+    std::size_t t = tail_.load();
+    if (t >= h) {
+      return t - h;
     }
-    return Capacity - head_ + tail_;
+    return Capacity - h + t;
   };
 
 private:
   std::array<T, Capacity> buffer_;
-  std::size_t head_ = 0;
-  std::size_t tail_ = 0;
+  std::atomic<std::size_t> head_{0};
+  std::atomic<std::size_t> tail_{0};
 };
 } // namespace spsc
