@@ -25,6 +25,13 @@ add_executable(main src/main.cpp)
 target_link_libraries(main PRIVATE spsc_queue)
 
 option(BUILD_TESTS "Build tests" ON)
+option(ENABLE_TSAN "Enable Thread Sanitizer" OFF)
+
+if(ENABLE_TSAN)
+    add_compile_options(-fsanitize=thread -g)
+    add_link_options(-fsanitize=thread)
+endif()
+
 if(BUILD_TESTS)
     include(FetchContent)
     FetchContent_Declare(
@@ -37,6 +44,11 @@ if(BUILD_TESTS)
     enable_testing()
     add_executable(test_basic tests/test_basic.cpp)
     target_link_libraries(test_basic PRIVATE spsc_queue GTest::gtest_main)
+
+    add_executable(test_stress tests/test_stress.cpp)
+    target_link_libraries(test_stress PRIVATE spsc_queue GTest::gtest_main)
+
     include(GoogleTest)
     gtest_discover_tests(test_basic)
+    gtest_discover_tests(test_stress)
 endif()
