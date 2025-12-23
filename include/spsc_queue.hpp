@@ -10,22 +10,25 @@ public:
   Queue() = default;
 
   bool push(const T &item) {
-    if (full()) {
+    std::size_t t = tail_.load(std::memory_order_relaxed);
+    std::size_t h = head_.load(std::memory_order_acquire);
+
+    if ((t + 1) % Capacity == h) {
       return false;
     }
-    std::size_t t = tail_.load();
     buffer_[t] = item;
-    tail_.store((t + 1) % Capacity);
+    tail_.store((t + 1) % Capacity, std::memory_order_release);
     return true;
   }
 
   bool pop(T &item) {
-    if (empty()) {
+    std::size_t t = tail_.load(std::memory_order_acquire);
+    std::size_t h = head_.load(std::memory_order_relaxed);
+    if (t == h) {
       return false;
     }
-    std::size_t h = head_.load();
     item = buffer_[h];
-    head_.store((h + 1) % Capacity);
+    head_.store((h + 1) % Capacity, std::memory_order_release);
     return true;
   }
 
