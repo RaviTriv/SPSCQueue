@@ -11,6 +11,8 @@
 
 namespace spsc {
 
+inline constexpr std::size_t kCacheLineSize = 64;
+
 enum class MemoryType { Local, Shared };
 enum class OpenMode { Create, Open, OpenOrCreate };
 
@@ -62,14 +64,14 @@ public:
 
 private:
   std::array<T, Capacity> buffer_;
-  std::atomic<std::size_t> head_{0};
-  std::atomic<std::size_t> tail_{0};
+  alignas(kCacheLineSize) std::atomic<std::size_t> head_{0};
+  alignas(kCacheLineSize) std::atomic<std::size_t> tail_{0};
 };
 
 template <typename T, std::size_t Capacity> struct SharedQueueStorage {
-  std::atomic<std::size_t> head{0};
-  std::atomic<std::size_t> tail{0};
-  std::array<T, Capacity> buffer;
+  alignas(kCacheLineSize) std::atomic<std::size_t> head{0};
+  alignas(kCacheLineSize) std::atomic<std::size_t> tail{0};
+  alignas(kCacheLineSize) std::array<T, Capacity> buffer;
 };
 
 template <typename T, std::size_t Capacity>
