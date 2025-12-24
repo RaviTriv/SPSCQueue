@@ -1,5 +1,7 @@
 # SPSCQueue
-Single Producer Single Consumer Queue
+Single Producer Single Consumer Lock Free Queue supporting interthread and shared memory interprocess communication.
+
+![Shared Memory IPC](./images/ipc.png)
 
 ## Build & Run
 ```bash
