@@ -1,12 +1,15 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstring>
 #include <fcntl.h>
 #include <string>
 #include <sys/mman.h>
 #include <system_error>
+#include <type_traits>
 #include <unistd.h>
 
 namespace spsc {
@@ -25,33 +28,93 @@ template <typename T, std::size_t Capacity,
           MemoryType Memory = MemoryType::Local>
 class Queue {
   static_assert(Capacity > 0, "Capacity must be positive");
-  static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
+  static_assert((Capacity & (Capacity - 1)) == 0,
+                "Capacity must be a power of 2");
   static constexpr std::size_t kMask = Capacity - 1;
 
 public:
   Queue() = default;
 
   bool push(const T &item) {
-    std::size_t t = tail_.load(std::memory_order_relaxed);
-    std::size_t h = head_.load(std::memory_order_acquire);
+    const std::size_t t = tail_.load(std::memory_order_relaxed);
+    const std::size_t next = (t + 1) & kMask;
 
-    if (((t + 1) & kMask) == h) {
-      return false;
+    if (next == cached_head_) {
+      cached_head_ = head_.load(std::memory_order_acquire);
+      if (next == cached_head_) {
+        return false;
+      }
     }
     buffer_[t] = item;
-    tail_.store((t + 1) & kMask, std::memory_order_release);
+    tail_.store(next, std::memory_order_release);
     return true;
   }
 
   bool pop(T &item) {
-    std::size_t t = tail_.load(std::memory_order_acquire);
-    std::size_t h = head_.load(std::memory_order_relaxed);
-    if (t == h) {
-      return false;
+    const std::size_t h = head_.load(std::memory_order_relaxed);
+
+    if (h == cached_tail_) {
+      cached_tail_ = tail_.load(std::memory_order_acquire);
+      if (h == cached_tail_) {
+        return false;
+      }
     }
     item = buffer_[h];
     head_.store((h + 1) & kMask, std::memory_order_release);
     return true;
+  }
+
+  std::size_t push_n(const T *items, std::size_t count) {
+    if (count == 0)
+      return 0;
+
+    const std::size_t t = tail_.load(std::memory_order_relaxed);
+
+    std::size_t available = (cached_head_ - t - 1) & kMask;
+    if (available < count) {
+      cached_head_ = head_.load(std::memory_order_acquire);
+      available = (cached_head_ - t - 1) & kMask;
+    }
+
+    count = std::min(count, available);
+    if (count == 0)
+      return 0;
+
+    const std::size_t first_chunk = std::min(count, Capacity - t);
+    copy_into_buffer(buffer_.data() + t, items, first_chunk);
+    if (first_chunk < count) {
+      copy_into_buffer(buffer_.data(), items + first_chunk,
+                       count - first_chunk);
+    }
+
+    tail_.store((t + count) & kMask, std::memory_order_release);
+    return count;
+  }
+
+  std::size_t pop_n(T *out, std::size_t count) {
+    if (count == 0)
+      return 0;
+
+    const std::size_t h = head_.load(std::memory_order_relaxed);
+
+    std::size_t available = (cached_tail_ - h) & kMask;
+    if (available < count) {
+      cached_tail_ = tail_.load(std::memory_order_acquire);
+      available = (cached_tail_ - h) & kMask;
+    }
+
+    count = std::min(count, available);
+    if (count == 0)
+      return 0;
+
+    const std::size_t first_chunk = std::min(count, Capacity - h);
+    copy_from_buffer(out, buffer_.data() + h, first_chunk);
+    if (first_chunk < count) {
+      copy_from_buffer(out + first_chunk, buffer_.data(), count - first_chunk);
+    }
+
+    head_.store((h + count) & kMask, std::memory_order_release);
+    return count;
   }
 
   bool empty() const { return head_.load() == tail_.load(); }
@@ -65,21 +128,42 @@ public:
   }
 
 private:
+  static void copy_into_buffer(T *dst, const T *src, std::size_t n) {
+    if constexpr (std::is_trivially_copyable_v<T>) {
+      std::memcpy(dst, src, n * sizeof(T));
+    } else {
+      std::copy(src, src + n, dst);
+    }
+  }
+
+  static void copy_from_buffer(T *dst, const T *src, std::size_t n) {
+    if constexpr (std::is_trivially_copyable_v<T>) {
+      std::memcpy(dst, src, n * sizeof(T));
+    } else {
+      std::copy(src, src + n, dst);
+    }
+  }
+
   alignas(kCacheLineSize) std::atomic<std::size_t> head_{0};
+  std::size_t cached_tail_{0};
   alignas(kCacheLineSize) std::atomic<std::size_t> tail_{0};
+  std::size_t cached_head_{0};
   alignas(kCacheLineSize) std::array<T, Capacity> buffer_;
 };
 
 template <typename T, std::size_t Capacity> struct SharedQueueStorage {
   alignas(kCacheLineSize) std::atomic<std::size_t> head{0};
+  std::size_t cached_tail{0};
   alignas(kCacheLineSize) std::atomic<std::size_t> tail{0};
+  std::size_t cached_head{0};
   alignas(kCacheLineSize) std::array<T, Capacity> buffer;
 };
 
 template <typename T, std::size_t Capacity>
 class Queue<T, Capacity, MemoryType::Shared> {
   static_assert(Capacity > 0, "Capacity must be positive");
-  static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
+  static_assert((Capacity & (Capacity - 1)) == 0,
+                "Capacity must be a power of 2");
   static constexpr std::size_t kMask = Capacity - 1;
 
 public:
@@ -106,14 +190,16 @@ public:
       break;
     }
     if (shm_fd_ == -1) {
-      throw std::system_error(errno, std::system_category(), "shm_open failed!");
+      throw std::system_error(errno, std::system_category(),
+                              "shm_open failed!");
     }
 
     if (is_creator) {
       if (ftruncate(shm_fd_, total_size) == -1) {
         close(shm_fd_);
         shm_unlink(shm_name_.c_str());
-        throw std::system_error(errno, std::system_category(), "ftruncate failed!");
+        throw std::system_error(errno, std::system_category(),
+                                "ftruncate failed!");
       }
     }
 
@@ -121,7 +207,8 @@ public:
                           MAP_SHARED, shm_fd_, 0);
     if (mapped_region_ == MAP_FAILED) {
       close(shm_fd_);
-      if (is_creator) shm_unlink(shm_name_.c_str());
+      if (is_creator)
+        shm_unlink(shm_name_.c_str());
       throw std::system_error(errno, std::system_category(), "mmap failed!!");
     }
     mapped_size_ = total_size;
@@ -176,27 +263,86 @@ public:
   }
 
   bool push(const T &item) {
-    std::size_t t = storage_->tail.load(std::memory_order_relaxed);
-    std::size_t h = storage_->head.load(std::memory_order_acquire);
+    const std::size_t t = storage_->tail.load(std::memory_order_relaxed);
+    const std::size_t next = (t + 1) & kMask;
 
-    if (((t + 1) & kMask) == h) {
-      return false;
+    if (next == storage_->cached_head) {
+      storage_->cached_head = storage_->head.load(std::memory_order_acquire);
+      if (next == storage_->cached_head) {
+        return false;
+      }
     }
     storage_->buffer[t] = item;
-    storage_->tail.store((t + 1) & kMask, std::memory_order_release);
+    storage_->tail.store(next, std::memory_order_release);
     return true;
   }
 
   bool pop(T &item) {
-    std::size_t t = storage_->tail.load(std::memory_order_acquire);
-    std::size_t h = storage_->head.load(std::memory_order_relaxed);
+    const std::size_t h = storage_->head.load(std::memory_order_relaxed);
 
-    if (t == h) {
-      return false;
+    if (h == storage_->cached_tail) {
+      storage_->cached_tail = storage_->tail.load(std::memory_order_acquire);
+      if (h == storage_->cached_tail) {
+        return false;
+      }
     }
     item = storage_->buffer[h];
     storage_->head.store((h + 1) & kMask, std::memory_order_release);
     return true;
+  }
+
+  std::size_t push_n(const T *items, std::size_t count) {
+    if (count == 0)
+      return 0;
+
+    const std::size_t t = storage_->tail.load(std::memory_order_relaxed);
+
+    std::size_t available = (storage_->cached_head - t - 1) & kMask;
+    if (available < count) {
+      storage_->cached_head = storage_->head.load(std::memory_order_acquire);
+      available = (storage_->cached_head - t - 1) & kMask;
+    }
+
+    count = std::min(count, available);
+    if (count == 0)
+      return 0;
+
+    const std::size_t first_chunk = std::min(count, Capacity - t);
+    copy_into_buffer(storage_->buffer.data() + t, items, first_chunk);
+    if (first_chunk < count) {
+      copy_into_buffer(storage_->buffer.data(), items + first_chunk,
+                       count - first_chunk);
+    }
+
+    storage_->tail.store((t + count) & kMask, std::memory_order_release);
+    return count;
+  }
+
+  std::size_t pop_n(T *out, std::size_t count) {
+    if (count == 0)
+      return 0;
+
+    const std::size_t h = storage_->head.load(std::memory_order_relaxed);
+
+    std::size_t available = (storage_->cached_tail - h) & kMask;
+    if (available < count) {
+      storage_->cached_tail = storage_->tail.load(std::memory_order_acquire);
+      available = (storage_->cached_tail - h) & kMask;
+    }
+
+    count = std::min(count, available);
+    if (count == 0)
+      return 0;
+
+    const std::size_t first_chunk = std::min(count, Capacity - h);
+    copy_from_buffer(out, storage_->buffer.data() + h, first_chunk);
+    if (first_chunk < count) {
+      copy_from_buffer(out + first_chunk, storage_->buffer.data(),
+                       count - first_chunk);
+    }
+
+    storage_->head.store((h + count) & kMask, std::memory_order_release);
+    return count;
   }
 
   bool empty() const { return storage_->head.load() == storage_->tail.load(); }
@@ -217,6 +363,22 @@ public:
   static void unlink(const std::string &name) { shm_unlink(name.c_str()); }
 
 private:
+  static void copy_into_buffer(T *dst, const T *src, std::size_t n) {
+    if constexpr (std::is_trivially_copyable_v<T>) {
+      std::memcpy(dst, src, n * sizeof(T));
+    } else {
+      std::copy(src, src + n, dst);
+    }
+  }
+
+  static void copy_from_buffer(T *dst, const T *src, std::size_t n) {
+    if constexpr (std::is_trivially_copyable_v<T>) {
+      std::memcpy(dst, src, n * sizeof(T));
+    } else {
+      std::copy(src, src + n, dst);
+    }
+  }
+
   int shm_fd_ = -1;
   void *mapped_region_ = nullptr;
   std::size_t mapped_size_ = 0;
