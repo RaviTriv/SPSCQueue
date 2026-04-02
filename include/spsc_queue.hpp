@@ -63,9 +63,9 @@ public:
   }
 
 private:
-  std::array<T, Capacity> buffer_;
   alignas(kCacheLineSize) std::atomic<std::size_t> head_{0};
   alignas(kCacheLineSize) std::atomic<std::size_t> tail_{0};
+  alignas(kCacheLineSize) std::array<T, Capacity> buffer_;
 };
 
 template <typename T, std::size_t Capacity> struct SharedQueueStorage {
