@@ -24,6 +24,10 @@ struct SharedMemoryConfig {
 template <typename T, std::size_t Capacity,
           MemoryType Memory = MemoryType::Local>
 class Queue {
+  static_assert(Capacity > 0, "Capacity must be positive");
+  static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
+  static constexpr std::size_t kMask = Capacity - 1;
+
 public:
   Queue() = default;
 
@@ -31,11 +35,11 @@ public:
     std::size_t t = tail_.load(std::memory_order_relaxed);
     std::size_t h = head_.load(std::memory_order_acquire);
 
-    if ((t + 1) % Capacity == h) {
+    if (((t + 1) & kMask) == h) {
       return false;
     }
     buffer_[t] = item;
-    tail_.store((t + 1) % Capacity, std::memory_order_release);
+    tail_.store((t + 1) & kMask, std::memory_order_release);
     return true;
   }
 
@@ -46,20 +50,18 @@ public:
       return false;
     }
     item = buffer_[h];
-    head_.store((h + 1) % Capacity, std::memory_order_release);
+    head_.store((h + 1) & kMask, std::memory_order_release);
     return true;
   }
 
   bool empty() const { return head_.load() == tail_.load(); }
-  bool full() const { return (tail_.load() + 1) % Capacity == head_.load(); }
+  bool full() const { return ((tail_.load() + 1) & kMask) == head_.load(); }
   static constexpr std::size_t capacity() { return Capacity; }
+  static constexpr std::size_t usable_capacity() { return Capacity - 1; }
   std::size_t size() const {
     std::size_t h = head_.load();
     std::size_t t = tail_.load();
-    if (t >= h) {
-      return t - h;
-    }
-    return Capacity - h + t;
+    return (t - h) & kMask;
   }
 
 private:
@@ -76,6 +78,10 @@ template <typename T, std::size_t Capacity> struct SharedQueueStorage {
 
 template <typename T, std::size_t Capacity>
 class Queue<T, Capacity, MemoryType::Shared> {
+  static_assert(Capacity > 0, "Capacity must be positive");
+  static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
+  static constexpr std::size_t kMask = Capacity - 1;
+
 public:
   explicit Queue(const SharedMemoryConfig &config) : shm_name_(config.name) {
     constexpr std::size_t total_size = sizeof(SharedQueueStorage<T, Capacity>);
@@ -173,11 +179,11 @@ public:
     std::size_t t = storage_->tail.load(std::memory_order_relaxed);
     std::size_t h = storage_->head.load(std::memory_order_acquire);
 
-    if ((t + 1) % Capacity == h) {
+    if (((t + 1) & kMask) == h) {
       return false;
     }
     storage_->buffer[t] = item;
-    storage_->tail.store((t + 1) % Capacity, std::memory_order_release);
+    storage_->tail.store((t + 1) & kMask, std::memory_order_release);
     return true;
   }
 
@@ -189,23 +195,21 @@ public:
       return false;
     }
     item = storage_->buffer[h];
-    storage_->head.store((h + 1) % Capacity, std::memory_order_release);
+    storage_->head.store((h + 1) & kMask, std::memory_order_release);
     return true;
   }
 
   bool empty() const { return storage_->head.load() == storage_->tail.load(); }
   bool full() const {
-    return (storage_->tail.load() + 1) % Capacity == storage_->head.load();
+    return ((storage_->tail.load() + 1) & kMask) == storage_->head.load();
   }
   static constexpr std::size_t capacity() { return Capacity; }
+  static constexpr std::size_t usable_capacity() { return Capacity - 1; }
 
   std::size_t size() const {
     std::size_t h = storage_->head.load();
     std::size_t t = storage_->tail.load();
-    if (t >= h) {
-      return t - h;
-    }
-    return Capacity - h + t;
+    return (t - h) & kMask;
   }
 
   const std::string &name() const { return shm_name_; }
